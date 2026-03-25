@@ -178,50 +178,50 @@ static int rebuild_and_reload_unlocked(void)
 
     char *config = malloc(buf_size);
     if (!config) {
-        fprintf(stderr, "zlog_modular: malloc failed for config buffer\n");
+        fprintf(stderr, "zlog_modular: malloc(%zu) failed for config buffer\n", buf_size);
         return -1;
     }
 
-    int offset = 0;
+    size_t offset = 0;
     int ret;
 
     /* [global] section */
     ret = snprintf(config + offset, buf_size - offset, "[global]\n");
-    if (ret < 0) goto err;
+    if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
     offset += ret;
 
     if (g_state.global_conf && g_state.global_conf[0]) {
         ret = snprintf(config + offset, buf_size - offset, "%s\n", g_state.global_conf);
-        if (ret < 0) goto err;
+        if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
         offset += ret;
     } else {
         ret = snprintf(config + offset, buf_size - offset, "strict init = false\n");
-        if (ret < 0) goto err;
+        if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
         offset += ret;
     }
 
     /* [formats] section */
     ret = snprintf(config + offset, buf_size - offset, "\n[formats]\n");
-    if (ret < 0) goto err;
+    if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
     offset += ret;
 
     for (mod = g_state.modules; mod; mod = mod->next) {
         for (line = mod->formats; line; line = line->next) {
             ret = snprintf(config + offset, buf_size - offset, "%s\n", line->text);
-            if (ret < 0) goto err;
+            if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
             offset += ret;
         }
     }
 
     /* [rules] section */
     ret = snprintf(config + offset, buf_size - offset, "\n[rules]\n");
-    if (ret < 0) goto err;
+    if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
     offset += ret;
 
     for (mod = g_state.modules; mod; mod = mod->next) {
         for (line = mod->rules; line; line = line->next) {
             ret = snprintf(config + offset, buf_size - offset, "%s\n", line->text);
-            if (ret < 0) goto err;
+            if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
             offset += ret;
         }
     }
