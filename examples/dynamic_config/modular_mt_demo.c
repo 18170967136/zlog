@@ -126,6 +126,14 @@ static void demo_concurrent_loading(void)
 
     printf("\n所有模块加载完成！共 %d 个模块注册\n", zlog_mod_count());
 
+    /* 导出 JSON 查看当前配置状态 */
+    printf("\n--- 当前模块配置（JSON 格式） ---\n");
+    char *json = zlog_mod_dump_json();
+    if (json) {
+        printf("%s\n", json);
+        free(json);
+    }
+
     /* 测试各模块日志 */
     printf("\n--- 测试各模块日志输出 ---\n");
     zlog_category_t *cat;
@@ -216,6 +224,14 @@ static void demo_unregister_module(void)
     printf("卸载后: 共 %d 个模块\n", zlog_mod_count());
     printf("cache 模块已注册? %s\n",
            zlog_mod_has_module("cache") ? "是" : "否");
+
+    /* 卸载后导出 JSON 查看变化 */
+    printf("\n--- 卸载后的模块配置（JSON 格式） ---\n");
+    char *json = zlog_mod_dump_json();
+    if (json) {
+        printf("%s\n", json);
+        free(json);
+    }
 }
 
 /*

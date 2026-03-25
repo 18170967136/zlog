@@ -5,17 +5,22 @@
  * 每个模块可以独立注册自己的格式和规则，本层维护一个全局注册表，
  * 在每次变更后自动重建完整配置字符串并调用 zlog_reload_from_string()。
  *
+ * 内部使用 cJSON 管理配置数据，支持通过 zlog_mod_dump_json() 导出
+ * 当前所有模块的注册状态为 JSON 文档，方便观测和调试。
+ *
  * 特点：
  *   - 不修改 zlog 源码，仅使用公共 API
  *   - 线程安全（使用 pthread_mutex 保护注册表）
  *   - 支持重复加载检测和覆盖
  *   - 支持按模块名卸载
+ *   - 支持导出 JSON 文档，提升可观测性
  *
  * 用法：
  *   1. 先调用 zlog_init_from_string() 初始化 zlog（基础配置）
  *   2. 调用 zlog_mod_init() 初始化模块管理器（传入全局部分的配置）
  *   3. 各模块调用 zlog_mod_register() 注册自己的格式和规则
- *   4. 程序退出时调用 zlog_mod_fini() 清理
+ *   4. 可随时调用 zlog_mod_dump_json() 查看当前配置状态
+ *   5. 程序退出时调用 zlog_mod_fini() 清理
  */
 
 #ifndef __zlog_modular_h
@@ -84,6 +89,29 @@ int zlog_mod_has_module(const char *module_name);
  * @return 模块数量
  */
 int zlog_mod_count(void);
+
+/**
+ * 导出当前所有模块的注册状态为 JSON 字符串
+ *
+ * 返回的 JSON 文档格式如下：
+ * {
+ *   "global_conf": "strict init = false",
+ *   "module_count": 2,
+ *   "modules": {
+ *     "auth": {
+ *       "formats": ["auth_fmt = \"%d [AUTH] %m%n\""],
+ *       "rules": ["auth.DEBUG >stdout; auth_fmt"]
+ *     },
+ *     "api": {
+ *       "formats": ["api_fmt = \"%d [API] %m%n\""],
+ *       "rules": ["api.INFO >stdout; api_fmt"]
+ *     }
+ *   }
+ * }
+ *
+ * @return  JSON 字符串（调用者负责用 free() 释放），失败返回 NULL
+ */
+char *zlog_mod_dump_json(void);
 
 #ifdef __cplusplus
 }

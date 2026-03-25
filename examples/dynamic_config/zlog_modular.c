@@ -1,8 +1,9 @@
 /*
  * zlog_modular.c - 模块化分散加载配置的封装层实现
  *
- * 使用链表维护各模块的格式和规则注册信息，
+ * 使用 cJSON 维护各模块的格式和规则注册信息，
  * 每次变更后自动重建完整配置字符串并调用 zlog_reload_from_string()。
+ * 可通过 zlog_mod_dump_json() 导出 JSON 文档以便观测当前配置状态。
  */
 
 #include <stdio.h>
@@ -12,141 +13,61 @@
 
 #include "zlog.h"
 #include "zlog_modular.h"
+#include "cJSON.h"
 
 /* ========== 内部数据结构 ========== */
 
-/* 单条配置行（格式或规则） */
-typedef struct config_line_s {
-    char *text;
-    struct config_line_s *next;
-} config_line_t;
-
-/* 模块注册信息 */
-typedef struct module_entry_s {
-    char *name;
-    config_line_t *formats;    /* 格式链表 */
-    config_line_t *rules;      /* 规则链表 */
-    struct module_entry_s *next;
-} module_entry_t;
-
-/* 全局状态 */
+/*
+ * 全局状态
+ *
+ * 内部 JSON 文档结构：
+ * {
+ *   "global_conf": "strict init = false",
+ *   "module_count": 2,
+ *   "modules": {
+ *     "auth": {
+ *       "formats": ["auth_fmt = \"%d [AUTH] %m%n\""],
+ *       "rules": ["auth.DEBUG >stdout; auth_fmt"]
+ *     },
+ *     "api": { ... }
+ *   }
+ * }
+ */
 static struct {
     int inited;
     pthread_mutex_t lock;
-    char *global_conf;          /* [global] 段内容 */
-    module_entry_t *modules;    /* 模块链表 */
-    int module_count;
+    cJSON *root;           /* JSON 根对象 */
 } g_state = {
     .inited = 0,
     .lock = PTHREAD_MUTEX_INITIALIZER,
-    .global_conf = NULL,
-    .modules = NULL,
-    .module_count = 0,
+    .root = NULL,
 };
 
 /* ========== 内部辅助函数 ========== */
 
-static config_line_t *config_line_new(const char *text)
+/* 获取 modules 对象（不加锁，由调用者负责加锁） */
+static cJSON *get_modules_unlocked(void)
 {
-    config_line_t *line = calloc(1, sizeof(config_line_t));
-    if (!line) return NULL;
-    line->text = strdup(text);
-    if (!line->text) {
-        free(line);
-        return NULL;
-    }
-    line->next = NULL;
-    return line;
+    return cJSON_GetObjectItemCaseSensitive(g_state.root, "modules");
 }
 
-static void config_line_list_free(config_line_t *head)
+/* 获取 module_count 数值（不加锁） */
+static int get_module_count_unlocked(void)
 {
-    config_line_t *cur, *next;
-    for (cur = head; cur; cur = next) {
-        next = cur->next;
-        free(cur->text);
-        free(cur);
-    }
-}
-
-static module_entry_t *module_entry_new(const char *name)
-{
-    module_entry_t *entry = calloc(1, sizeof(module_entry_t));
-    if (!entry) return NULL;
-    entry->name = strdup(name);
-    if (!entry->name) {
-        free(entry);
-        return NULL;
-    }
-    entry->formats = NULL;
-    entry->rules = NULL;
-    entry->next = NULL;
-    return entry;
-}
-
-static void module_entry_free(module_entry_t *entry)
-{
-    if (!entry) return;
-    free(entry->name);
-    config_line_list_free(entry->formats);
-    config_line_list_free(entry->rules);
-    free(entry);
-}
-
-static void module_list_free(module_entry_t *head)
-{
-    module_entry_t *cur, *next;
-    for (cur = head; cur; cur = next) {
-        next = cur->next;
-        module_entry_free(cur);
-    }
-}
-
-/* 在链表末尾追加配置行 */
-static int config_line_list_append(config_line_t **head, const char *text)
-{
-    config_line_t *line = config_line_new(text);
-    if (!line) return -1;
-
-    if (!*head) {
-        *head = line;
-    } else {
-        config_line_t *tail = *head;
-        while (tail->next) tail = tail->next;
-        tail->next = line;
+    cJSON *cnt = cJSON_GetObjectItemCaseSensitive(g_state.root, "module_count");
+    if (cnt && cJSON_IsNumber(cnt)) {
+        return cnt->valueint;
     }
     return 0;
 }
 
-/* 查找模块（不加锁，由调用者负责加锁） */
-static module_entry_t *find_module_unlocked(const char *name)
+/* 设置 module_count 数值（不加锁） */
+static void set_module_count_unlocked(int count)
 {
-    module_entry_t *cur;
-    for (cur = g_state.modules; cur; cur = cur->next) {
-        if (strcmp(cur->name, name) == 0) {
-            return cur;
-        }
+    cJSON *cnt = cJSON_GetObjectItemCaseSensitive(g_state.root, "module_count");
+    if (cnt) {
+        cJSON_SetNumberValue(cnt, count);
     }
-    return NULL;
-}
-
-/* 卸载模块（不加锁，由调用者负责加锁） */
-static int unregister_module_unlocked(const char *name)
-{
-    module_entry_t *cur, *prev = NULL;
-    for (cur = g_state.modules; cur; prev = cur, cur = cur->next) {
-        if (strcmp(cur->name, name) == 0) {
-            if (prev) {
-                prev->next = cur->next;
-            } else {
-                g_state.modules = cur->next;
-            }
-            module_entry_free(cur);
-            g_state.module_count--;
-            return 0;
-        }
-    }
-    return -1; /* not found */
 }
 
 /*
@@ -155,25 +76,41 @@ static int unregister_module_unlocked(const char *name)
  */
 static int rebuild_and_reload_unlocked(void)
 {
+    cJSON *modules = get_modules_unlocked();
+    cJSON *global_conf_item = cJSON_GetObjectItemCaseSensitive(g_state.root, "global_conf");
+    const char *global_conf = NULL;
+
+    if (global_conf_item && cJSON_IsString(global_conf_item)) {
+        global_conf = global_conf_item->valuestring;
+    }
+
     /*
      * 估算配置缓冲区大小：
      * [global] + global_conf + [formats] + all formats + [rules] + all rules
      */
     size_t buf_size = 1024; /* 基础部分 */
-    module_entry_t *mod;
-    config_line_t *line;
 
-    /* 先计算需要多大的缓冲区 */
-    for (mod = g_state.modules; mod; mod = mod->next) {
-        for (line = mod->formats; line; line = line->next) {
-            buf_size += strlen(line->text) + 2; /* +2 for \n and safety */
-        }
-        for (line = mod->rules; line; line = line->next) {
-            buf_size += strlen(line->text) + 2;
-        }
+    if (global_conf) {
+        buf_size += strlen(global_conf) + 1;
     }
-    if (g_state.global_conf) {
-        buf_size += strlen(g_state.global_conf) + 1;
+
+    /* 遍历所有模块，统计 formats 和 rules 的总大小 */
+    cJSON *mod = NULL;
+    cJSON_ArrayForEach(mod, modules) {
+        cJSON *formats = cJSON_GetObjectItemCaseSensitive(mod, "formats");
+        cJSON *rules = cJSON_GetObjectItemCaseSensitive(mod, "rules");
+        cJSON *item = NULL;
+
+        cJSON_ArrayForEach(item, formats) {
+            if (cJSON_IsString(item)) {
+                buf_size += strlen(item->valuestring) + 2;
+            }
+        }
+        cJSON_ArrayForEach(item, rules) {
+            if (cJSON_IsString(item)) {
+                buf_size += strlen(item->valuestring) + 2;
+            }
+        }
     }
 
     char *config = malloc(buf_size);
@@ -190,8 +127,8 @@ static int rebuild_and_reload_unlocked(void)
     if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
     offset += ret;
 
-    if (g_state.global_conf && g_state.global_conf[0]) {
-        ret = snprintf(config + offset, buf_size - offset, "%s\n", g_state.global_conf);
+    if (global_conf && global_conf[0]) {
+        ret = snprintf(config + offset, buf_size - offset, "%s\n", global_conf);
         if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
         offset += ret;
     } else {
@@ -205,11 +142,15 @@ static int rebuild_and_reload_unlocked(void)
     if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
     offset += ret;
 
-    for (mod = g_state.modules; mod; mod = mod->next) {
-        for (line = mod->formats; line; line = line->next) {
-            ret = snprintf(config + offset, buf_size - offset, "%s\n", line->text);
-            if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
-            offset += ret;
+    cJSON_ArrayForEach(mod, modules) {
+        cJSON *formats = cJSON_GetObjectItemCaseSensitive(mod, "formats");
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, formats) {
+            if (cJSON_IsString(item)) {
+                ret = snprintf(config + offset, buf_size - offset, "%s\n", item->valuestring);
+                if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
+                offset += ret;
+            }
         }
     }
 
@@ -218,11 +159,15 @@ static int rebuild_and_reload_unlocked(void)
     if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
     offset += ret;
 
-    for (mod = g_state.modules; mod; mod = mod->next) {
-        for (line = mod->rules; line; line = line->next) {
-            ret = snprintf(config + offset, buf_size - offset, "%s\n", line->text);
-            if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
-            offset += ret;
+    cJSON_ArrayForEach(mod, modules) {
+        cJSON *rules = cJSON_GetObjectItemCaseSensitive(mod, "rules");
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, rules) {
+            if (cJSON_IsString(item)) {
+                ret = snprintf(config + offset, buf_size - offset, "%s\n", item->valuestring);
+                if (ret < 0 || (size_t)ret >= buf_size - offset) goto err;
+                offset += ret;
+            }
         }
     }
 
@@ -250,20 +195,29 @@ int zlog_mod_init(const char *global_conf)
 
     if (g_state.inited) {
         /* 已经初始化过，先清理旧数据 */
-        module_list_free(g_state.modules);
-        g_state.modules = NULL;
-        g_state.module_count = 0;
-        free(g_state.global_conf);
-        g_state.global_conf = NULL;
+        cJSON_Delete(g_state.root);
+        g_state.root = NULL;
     }
 
-    if (global_conf) {
-        g_state.global_conf = strdup(global_conf);
-        if (!g_state.global_conf) {
-            pthread_mutex_unlock(&g_state.lock);
-            return -1;
-        }
+    /* 创建根 JSON 对象 */
+    g_state.root = cJSON_CreateObject();
+    if (!g_state.root) {
+        pthread_mutex_unlock(&g_state.lock);
+        return -1;
     }
+
+    /* 设置 global_conf */
+    if (global_conf) {
+        cJSON_AddStringToObject(g_state.root, "global_conf", global_conf);
+    } else {
+        cJSON_AddStringToObject(g_state.root, "global_conf", "");
+    }
+
+    /* 初始化 module_count */
+    cJSON_AddNumberToObject(g_state.root, "module_count", 0);
+
+    /* 创建 modules 对象 */
+    cJSON_AddObjectToObject(g_state.root, "modules");
 
     g_state.inited = 1;
 
@@ -275,13 +229,8 @@ void zlog_mod_fini(void)
 {
     pthread_mutex_lock(&g_state.lock);
 
-    module_list_free(g_state.modules);
-    g_state.modules = NULL;
-    g_state.module_count = 0;
-
-    free(g_state.global_conf);
-    g_state.global_conf = NULL;
-
+    cJSON_Delete(g_state.root);
+    g_state.root = NULL;
     g_state.inited = 0;
 
     pthread_mutex_unlock(&g_state.lock);
@@ -292,7 +241,6 @@ int zlog_mod_register(const char *module_name,
                       const char *rules[], int rule_count)
 {
     int i, rc;
-    module_entry_t *entry;
 
     if (!module_name) return -1;
 
@@ -304,40 +252,50 @@ int zlog_mod_register(const char *module_name,
         return -1;
     }
 
-    /* If module already exists, remove it first (override) */
-    if (find_module_unlocked(module_name)) {
-        unregister_module_unlocked(module_name);
+    cJSON *modules = get_modules_unlocked();
+    if (!modules) {
+        pthread_mutex_unlock(&g_state.lock);
+        return -1;
     }
 
-    /* Create new entry */
-    entry = module_entry_new(module_name);
+    /* If module already exists, remove it first (override) */
+    if (cJSON_HasObjectItem(modules, module_name)) {
+        cJSON_DeleteItemFromObjectCaseSensitive(modules, module_name);
+        set_module_count_unlocked(get_module_count_unlocked() - 1);
+    }
+
+    /* Create new module entry */
+    cJSON *entry = cJSON_CreateObject();
     if (!entry) {
         pthread_mutex_unlock(&g_state.lock);
         return -1;
     }
 
-    /* Add formats */
+    /* Add formats array */
+    cJSON *fmt_array = cJSON_AddArrayToObject(entry, "formats");
+    if (!fmt_array) {
+        cJSON_Delete(entry);
+        pthread_mutex_unlock(&g_state.lock);
+        return -1;
+    }
     for (i = 0; i < format_count && formats; i++) {
-        if (config_line_list_append(&entry->formats, formats[i])) {
-            module_entry_free(entry);
-            pthread_mutex_unlock(&g_state.lock);
-            return -1;
-        }
+        cJSON_AddItemToArray(fmt_array, cJSON_CreateString(formats[i]));
     }
 
-    /* Add rules */
+    /* Add rules array */
+    cJSON *rule_array = cJSON_AddArrayToObject(entry, "rules");
+    if (!rule_array) {
+        cJSON_Delete(entry);
+        pthread_mutex_unlock(&g_state.lock);
+        return -1;
+    }
     for (i = 0; i < rule_count && rules; i++) {
-        if (config_line_list_append(&entry->rules, rules[i])) {
-            module_entry_free(entry);
-            pthread_mutex_unlock(&g_state.lock);
-            return -1;
-        }
+        cJSON_AddItemToArray(rule_array, cJSON_CreateString(rules[i]));
     }
 
-    /* Insert at head */
-    entry->next = g_state.modules;
-    g_state.modules = entry;
-    g_state.module_count++;
+    /* Add entry to modules object */
+    cJSON_AddItemToObject(modules, module_name, entry);
+    set_module_count_unlocked(get_module_count_unlocked() + 1);
 
     /* Rebuild and reload */
     rc = rebuild_and_reload_unlocked();
@@ -359,10 +317,14 @@ int zlog_mod_unregister(const char *module_name)
         return -1;
     }
 
-    if (unregister_module_unlocked(module_name) != 0) {
+    cJSON *modules = get_modules_unlocked();
+    if (!modules || !cJSON_HasObjectItem(modules, module_name)) {
         pthread_mutex_unlock(&g_state.lock);
         return -1; /* not found */
     }
+
+    cJSON_DeleteItemFromObjectCaseSensitive(modules, module_name);
+    set_module_count_unlocked(get_module_count_unlocked() - 1);
 
     /* Rebuild and reload */
     rc = rebuild_and_reload_unlocked();
@@ -378,7 +340,12 @@ int zlog_mod_has_module(const char *module_name)
     if (!module_name) return 0;
 
     pthread_mutex_lock(&g_state.lock);
-    found = (find_module_unlocked(module_name) != NULL) ? 1 : 0;
+    if (!g_state.inited || !g_state.root) {
+        pthread_mutex_unlock(&g_state.lock);
+        return 0;
+    }
+    cJSON *modules = get_modules_unlocked();
+    found = (modules && cJSON_HasObjectItem(modules, module_name)) ? 1 : 0;
     pthread_mutex_unlock(&g_state.lock);
 
     return found;
@@ -389,8 +356,30 @@ int zlog_mod_count(void)
     int count;
 
     pthread_mutex_lock(&g_state.lock);
-    count = g_state.module_count;
+    if (!g_state.inited || !g_state.root) {
+        pthread_mutex_unlock(&g_state.lock);
+        return 0;
+    }
+    count = get_module_count_unlocked();
     pthread_mutex_unlock(&g_state.lock);
 
     return count;
+}
+
+char *zlog_mod_dump_json(void)
+{
+    char *json_str = NULL;
+
+    pthread_mutex_lock(&g_state.lock);
+
+    if (!g_state.inited || !g_state.root) {
+        pthread_mutex_unlock(&g_state.lock);
+        return NULL;
+    }
+
+    /* cJSON_Print 返回格式化的 JSON 字符串（调用者用 free() 释放） */
+    json_str = cJSON_Print(g_state.root);
+
+    pthread_mutex_unlock(&g_state.lock);
+    return json_str;
 }

@@ -18,6 +18,8 @@ int zlog_reload_from_string(const char *config_string);
 
 本目录额外提供了 `zlog_modular.h` / `zlog_modular.c` 封装层，基于 `zlog_reload_from_string()` 实现模块化分散加载。**不修改 zlog 源码**，仅使用公共 API。
 
+内部使用 [cJSON](https://github.com/DaveGamble/cJSON)（MIT 许可）管理配置数据，支持通过 `zlog_mod_dump_json()` 导出 JSON 文档，方便观测和调试。
+
 ```c
 #include "zlog_modular.h"
 
@@ -38,16 +40,56 @@ int zlog_mod_has_module(const char *module_name);
 /* 获取已注册模块数量 */
 int zlog_mod_count(void);
 
+/* 导出当前配置状态为 JSON 字符串（调用者用 free() 释放） */
+char *zlog_mod_dump_json(void);
+
 /* 清理模块管理器 */
 void zlog_mod_fini(void);
 ```
 
 ### 设计思路
 
-- 维护一个全局注册表（链表），记录每个模块的格式和规则
+- 内部使用 cJSON 对象维护全局注册表，记录每个模块的格式和规则
 - 每次 `zlog_mod_register()` / `zlog_mod_unregister()` 时，自动合并所有模块的配置，生成完整配置字符串，调用 `zlog_reload_from_string()`
 - 同名模块重复注册时，自动覆盖旧配置（解决重复加载问题）
 - 使用 `pthread_mutex` 保护注册表（线程安全）
+- 调用 `zlog_mod_dump_json()` 可随时导出 JSON 文档，清晰展示所有模块的配置状态
+
+### JSON 可观测性
+
+调用 `zlog_mod_dump_json()` 返回的 JSON 文档格式：
+
+```json
+{
+    "global_conf": "strict init = false",
+    "module_count": 3,
+    "modules": {
+        "auth": {
+            "formats": ["auth_fmt = \"%d [AUTH] %m%n\""],
+            "rules": ["auth.DEBUG >stdout; auth_fmt"]
+        },
+        "api": {
+            "formats": ["api_fmt = \"%d [API] %m%n\""],
+            "rules": ["api.INFO >stdout; api_fmt"]
+        },
+        "database": {
+            "formats": ["db_fmt = \"%d [DB] %m%n\""],
+            "rules": ["database.WARN >stdout; db_fmt"]
+        }
+    }
+}
+```
+
+使用示例：
+
+```c
+/* 随时查看当前配置状态 */
+char *json = zlog_mod_dump_json();
+if (json) {
+    printf("当前配置:\n%s\n", json);
+    free(json);
+}
+```
 
 ## 使用场景
 
@@ -105,7 +147,7 @@ make
 cd examples/dynamic_config
 gcc -o simple_demo simple_demo.c -I../../src -L../../src -lzlog -lpthread
 gcc -o dynamic_demo dynamic_demo.c -I../../src -L../../src -lzlog -lpthread
-gcc -o modular_mt_demo modular_mt_demo.c zlog_modular.c -I../../src -L../../src -lzlog -lpthread
+gcc -o modular_mt_demo modular_mt_demo.c zlog_modular.c cJSON.c -I../../src -L../../src -lzlog -lpthread -lm
 
 # 设置库路径并运行
 export LD_LIBRARY_PATH=../../src:$LD_LIBRARY_PATH
@@ -177,6 +219,15 @@ void my_module_init_logging(void) {
 
     /* 如果模块已注册过，zlog_mod_register 会自动覆盖 */
     zlog_mod_register("my_module", formats, 1, rules, 1);
+}
+
+/* 随时查看当前所有模块的配置状态 */
+void dump_logging_config(void) {
+    char *json = zlog_mod_dump_json();
+    if (json) {
+        printf("当前日志配置:\n%s\n", json);
+        free(json);
+    }
 }
 ```
 
@@ -254,6 +305,7 @@ void on_config_update(const char *remote_config) {
 | 灵活性 | 静态，需要提前定义 | 动态，运行时构建 | 动态，按模块增量添加 |
 | 解耦性 | 所有模块耦合在一个文件 | 需手动合并所有模块配置 | 每个模块完全独立 |
 | 调试 | 修改文件需要 reload | 可通过命令即时调整 | 可按模块注册/卸载 |
+| 可观测性 | 查看文件即可 | 需自行维护配置副本 | `zlog_mod_dump_json()` 导出 JSON |
 | 复杂度 | 简单，直接编辑文件 | 需要编程构建字符串 | API 调用，最简单 |
 | 重复处理 | 手动避免 | 手动避免 | 自动检测和覆盖 |
 | 线程安全 | N/A | reload 线程安全 | 注册/卸载线程安全 |
