@@ -95,6 +95,7 @@ static int rebuild_and_reload_unlocked(void)
     }
 
     /* 遍历所有模块，统计 formats 和 rules 的总大小 */
+    /* 注：cJSON_ArrayForEach 可用于 object 和 array，两者内部均为 child 链表 */
     cJSON *mod = NULL;
     cJSON_ArrayForEach(mod, modules) {
         cJSON *formats = cJSON_GetObjectItemCaseSensitive(mod, "formats");
