@@ -66,3 +66,7 @@ if (UNIT_TEST)
     enable_testing()
     add_subdirectory(test)
 endif ()
+
+if (BUILD_EXAMPLES)
+    add_subdirectory(examples/multi_thread)
+endif ()
