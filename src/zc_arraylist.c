@@ -140,6 +140,7 @@ int zc_arraylist_sortadd(zc_arraylist_t * a_list, zc_arraylist_cmp_fn cmp,
 
 int zc_arraylist_remove_keep_order(zc_arraylist_t * a_list, int idx)
 {
+	if (!a_list) return -1;
 	if (idx < 0 || idx >= a_list->len) {
 		return -1;
 	}

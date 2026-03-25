@@ -14,7 +14,7 @@
  */
 
 /*
- * test_modular_config.c — Test for the modular configuration API
+ * test_modular_config.c - Test for the modular configuration API
  *
  * Tests:
  *   zlog_add_format()
