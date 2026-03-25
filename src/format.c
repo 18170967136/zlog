@@ -149,23 +149,6 @@ err:
 	return NULL;
 }
 
-zlog_format_t *zlog_format_new_from_parts(const char *name, const char *pattern, int *time_cache_count)
-{
-	char line[MAXLEN_CFG_LINE * 2 + 10];
-	int len;
-
-	zc_assert(name, NULL);
-	zc_assert(pattern, NULL);
-
-	len = snprintf(line, sizeof(line), "%s = \"%s\"", name, pattern);
-	if (len < 0 || (size_t)len >= sizeof(line)) {
-		zc_error("format line too long, name[%s]", name);
-		return NULL;
-	}
-
-	return zlog_format_new(line, time_cache_count);
-}
-
 /*******************************************************************************/
 /* return 0	success, or buf is full
  * return -1	fail

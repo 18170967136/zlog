@@ -14,32 +14,12 @@ int zlog_init_from_string(const char *config_string);
 int zlog_reload_from_string(const char *config_string);
 ```
 
-以及模块化增量配置 API：
-
-```c
-/* 添加或覆盖格式（同名格式会被新定义覆盖） */
-int zlog_add_format(const char *name, const char *pattern);
-
-/* 添加一条规则（格式同配置文件中的规则行） */
-int zlog_add_rule(const char *rule_line);
-
-/* 删除某分类的所有规则（返回删除的规则数，-1 表示失败） */
-int zlog_remove_rules(const char *category);
-
-/* 查询格式是否存在（1=存在, 0=不存在, -1=出错） */
-int zlog_has_format(const char *name);
-
-/* 查询某分类是否有规则（1=有, 0=没有, -1=出错） */
-int zlog_has_category_rules(const char *category);
-```
-
 ## 使用场景
 
 1. **插件化架构**：插件加载时动态添加其日志分类
 2. **运行时配置调整**：根据用户命令或远程配置动态改变日志级别
 3. **模块化系统**：每个模块启动时注册自己的日志规则
 4. **程序解耦**：不同模块无需提前在配置文件中声明
-5. **分散加载**：各模块独立加载自己的配置，重复加载自动覆盖
 
 ## 示例文件
 
@@ -54,13 +34,6 @@ int zlog_has_category_rules(const char *category);
 - 启动时批量添加多个模块
 - 运行时动态添加新插件
 - 根据条件调整日志级别
-
-### modular_demo.c
-模块化分散加载示例，演示：
-- 每个模块独立注册自己的格式和规则
-- 重复加载同一模块时自动覆盖旧规则
-- 格式名冲突的检测与处理
-- 使用 `zlog_add_format()`、`zlog_add_rule()`、`zlog_remove_rules()` 等新 API
 
 ## 编译和运行
 
@@ -138,34 +111,6 @@ zlog_info(cat, "after reload");
 每次调用 `zlog_reload_from_string()` 都会完全替换当前配置，不是增量添加。
 如果需要保留现有分类，必须在新配置中重新包含它们的规则。
 
-如果需要增量添加，使用模块化 API：`zlog_add_format()`、`zlog_add_rule()`、`zlog_remove_rules()`。
-
-### 5. 模块化加载（分散加载）
-
-使用模块化 API 可以实现每个模块独立加载配置，无需重建完整配置：
-
-```c
-/* 每个模块独立注册自己的日志配置 */
-void module_init_logging(const char *module_name) {
-    char rule[256];
-
-    /* 检查是否已加载过（避免重复） */
-    if (zlog_has_category_rules(module_name)) {
-        /* 先清除旧规则 */
-        zlog_remove_rules(module_name);
-    }
-
-    /* 添加模块专用格式（同名会覆盖） */
-    char fmt_name[64];
-    snprintf(fmt_name, sizeof(fmt_name), "%s_fmt", module_name);
-    zlog_add_format(fmt_name, "%d [%c] [%-5V] %m%n");
-
-    /* 添加模块规则 */
-    snprintf(rule, sizeof(rule), "%s.DEBUG >stdout; %s", module_name, fmt_name);
-    zlog_add_rule(rule);
-}
-```
-
 ## 实际应用示例
 
 ### 示例1：插件系统
@@ -235,14 +180,13 @@ void on_config_update(const char *remote_config) {
 
 ## 与配置文件方式的对比
 
-| 方面 | 配置文件 | 动态配置字符串 | 模块化 API |
-|------|----------|----------------|------------|
-| 灵活性 | 静态，需要提前定义 | 动态，运行时构建 | 动态，增量添加 |
-| 解耦性 | 所有模块耦合在一个文件 | 每个模块独立管理 | 每个模块完全独立 |
-| 调试 | 修改文件需要 reload | 可通过命令即时调整 | 可逐条添加/删除 |
-| 复杂度 | 简单，直接编辑文件 | 需要编程构建字符串 | API 调用，最简单 |
-| 重复处理 | 手动避免 | 手动避免 | 自动检测和覆盖 |
-| 适用场景 | 配置相对固定 | 配置动态变化 | 模块化/插件化架构 |
+| 方面 | 配置文件 | 动态配置字符串 |
+|------|----------|----------------|
+| 灵活性 | 静态，需要提前定义 | 动态，运行时构建 |
+| 解耦性 | 所有模块耦合在一个文件 | 每个模块独立管理 |
+| 调试 | 修改文件需要 reload | 可通过命令即时调整 |
+| 复杂度 | 简单，直接编辑文件 | 需要编程构建字符串 |
+| 适用场景 | 配置相对固定 | 配置动态变化 |
 
 ## 最佳实践
 
@@ -258,14 +202,7 @@ void on_config_update(const char *remote_config) {
 A: reload 期间会短暂阻塞，但不会丢失日志。建议在低负载时刻执行。
 
 **Q: 可以只添加新分类不影响现有的吗？**
-A: 使用 `zlog_reload_from_string()` 时不行，每次 reload 都是完整替换。
-但使用模块化 API（`zlog_add_rule()`）可以增量添加规则，不影响现有配置。
-
-**Q: 多个模块格式名冲突怎么办？**
-A: 使用 `zlog_add_format()` 时，同名格式会被新定义覆盖。建议给格式名加模块前缀（如 `auth_fmt`）以避免冲突。
-
-**Q: 重复加载同一模块怎么处理？**
-A: 使用 `zlog_has_category_rules()` 检查是否已加载，如果是则先调用 `zlog_remove_rules()` 清除旧规则，再用 `zlog_add_rule()` 添加新规则。
+A: 不行，每次 reload 都是完整替换。需要在新配置中包含所有需要的规则。
 
 **Q: 配置字符串中的百分号需要转义吗？**
 A: 在 C 字符串中，格式化符号的百分号需要写成 `%%`（两个百分号）。

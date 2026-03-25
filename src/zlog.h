@@ -91,13 +91,6 @@ typedef struct zlog_msg_s {
 typedef int (*zlog_record_fn)(zlog_msg_t *msg);
 int zlog_set_record(const char *rname, zlog_record_fn record);
 
-/* Modular configuration API — incremental add/remove of formats and rules */
-int zlog_add_format(const char *name, const char *pattern);
-int zlog_add_rule(const char *rule_line);
-int zlog_remove_rules(const char *category);
-int zlog_has_format(const char *name);
-int zlog_has_category_rules(const char *category);
-
 const char *zlog_version(void);
 
 /******* useful macros, can be redefined at user's h file **********/
