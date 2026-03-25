@@ -28,6 +28,7 @@ struct zlog_format_s {
 };
 
 zlog_format_t *zlog_format_new(char *line, int * time_cache_count);
+zlog_format_t *zlog_format_new_from_parts(const char *name, const char *pattern, int *time_cache_count);
 void zlog_format_del(zlog_format_t * a_format);
 void zlog_format_profile(zlog_format_t * a_format, int flag);
 

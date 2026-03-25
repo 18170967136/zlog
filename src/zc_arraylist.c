@@ -137,3 +137,20 @@ int zc_arraylist_sortadd(zc_arraylist_t * a_list, zc_arraylist_cmp_fn cmp,
 	else
 		return zc_arraylist_insert_inner(a_list, i, data);
 }
+
+int zc_arraylist_remove_keep_order(zc_arraylist_t * a_list, int idx)
+{
+	if (idx < 0 || idx >= a_list->len) {
+		return -1;
+	}
+	if (a_list->del && a_list->array[idx]) {
+		a_list->del(a_list->array[idx]);
+	}
+	a_list->len--;
+	if (idx < a_list->len) {
+		memmove(a_list->array + idx, a_list->array + idx + 1,
+			(a_list->len - idx) * sizeof(void *));
+	}
+	a_list->array[a_list->len] = NULL;
+	return 0;
+}
