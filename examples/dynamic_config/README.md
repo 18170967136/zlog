@@ -14,12 +14,48 @@ int zlog_init_from_string(const char *config_string);
 int zlog_reload_from_string(const char *config_string);
 ```
 
+## 模块化加载封装 (zlog_modular)
+
+本目录额外提供了 `zlog_modular.h` / `zlog_modular.c` 封装层，基于 `zlog_reload_from_string()` 实现模块化分散加载。**不修改 zlog 源码**，仅使用公共 API。
+
+```c
+#include "zlog_modular.h"
+
+/* 初始化模块管理器 */
+int zlog_mod_init(const char *global_conf);
+
+/* 注册一个模块的格式和规则（同名模块自动覆盖） */
+int zlog_mod_register(const char *module_name,
+                      const char *formats[], int format_count,
+                      const char *rules[], int rule_count);
+
+/* 卸载一个模块 */
+int zlog_mod_unregister(const char *module_name);
+
+/* 查询模块是否已注册 */
+int zlog_mod_has_module(const char *module_name);
+
+/* 获取已注册模块数量 */
+int zlog_mod_count(void);
+
+/* 清理模块管理器 */
+void zlog_mod_fini(void);
+```
+
+### 设计思路
+
+- 维护一个全局注册表（链表），记录每个模块的格式和规则
+- 每次 `zlog_mod_register()` / `zlog_mod_unregister()` 时，自动合并所有模块的配置，生成完整配置字符串，调用 `zlog_reload_from_string()`
+- 同名模块重复注册时，自动覆盖旧配置（解决重复加载问题）
+- 使用 `pthread_mutex` 保护注册表（线程安全）
+
 ## 使用场景
 
 1. **插件化架构**：插件加载时动态添加其日志分类
 2. **运行时配置调整**：根据用户命令或远程配置动态改变日志级别
 3. **模块化系统**：每个模块启动时注册自己的日志规则
 4. **程序解耦**：不同模块无需提前在配置文件中声明
+5. **分散加载**：各模块在独立线程中加载自己的配置，互不影响
 
 ## 示例文件
 
@@ -35,6 +71,13 @@ int zlog_reload_from_string(const char *config_string);
 - 运行时动态添加新插件
 - 根据条件调整日志级别
 
+### modular_mt_demo.c
+**多线程多模块分散加载示例**，使用 `zlog_modular.h` 封装层，演示：
+- 5 个线程并发注册 5 个模块的日志配置
+- 重复加载同一模块时自动覆盖旧配置
+- 运行时卸载模块
+- 多线程并发日志输出
+
 ## 编译和运行
 
 ### 方式1：使用 CMake（推荐）
@@ -48,6 +91,7 @@ cmake --build build
 cd examples/dynamic_config
 ../../build/examples/dynamic_config/simple_demo
 ../../build/examples/dynamic_config/dynamic_demo
+../../build/examples/dynamic_config/modular_mt_demo
 ```
 
 ### 方式2：手动编译
@@ -61,11 +105,13 @@ make
 cd examples/dynamic_config
 gcc -o simple_demo simple_demo.c -I../../src -L../../src -lzlog -lpthread
 gcc -o dynamic_demo dynamic_demo.c -I../../src -L../../src -lzlog -lpthread
+gcc -o modular_mt_demo modular_mt_demo.c zlog_modular.c -I../../src -L../../src -lzlog -lpthread
 
 # 设置库路径并运行
 export LD_LIBRARY_PATH=../../src:$LD_LIBRARY_PATH
 ./simple_demo
 ./dynamic_demo
+./modular_mt_demo
 ```
 
 ## 关键要点
@@ -110,6 +156,29 @@ zlog_info(cat, "after reload");
 
 每次调用 `zlog_reload_from_string()` 都会完全替换当前配置，不是增量添加。
 如果需要保留现有分类，必须在新配置中重新包含它们的规则。
+
+如果需要增量添加，使用 `zlog_modular.h` 封装层，它会自动管理所有模块的配置合并。
+
+### 5. 模块化分散加载
+
+使用 `zlog_modular.h` 封装层可以实现每个模块独立加载配置，无需手动管理完整配置字符串：
+
+```c
+#include "zlog_modular.h"
+
+/* 每个模块独立注册自己的日志配置 */
+void my_module_init_logging(void) {
+    const char *formats[] = {
+        "my_fmt = \"%d [%c] [%-5V] %m%n\""
+    };
+    const char *rules[] = {
+        "my_module.DEBUG >stdout; my_fmt"
+    };
+
+    /* 如果模块已注册过，zlog_mod_register 会自动覆盖 */
+    zlog_mod_register("my_module", formats, 1, rules, 1);
+}
+```
 
 ## 实际应用示例
 
@@ -180,13 +249,15 @@ void on_config_update(const char *remote_config) {
 
 ## 与配置文件方式的对比
 
-| 方面 | 配置文件 | 动态配置字符串 |
-|------|----------|----------------|
-| 灵活性 | 静态，需要提前定义 | 动态，运行时构建 |
-| 解耦性 | 所有模块耦合在一个文件 | 每个模块独立管理 |
-| 调试 | 修改文件需要 reload | 可通过命令即时调整 |
-| 复杂度 | 简单，直接编辑文件 | 需要编程构建字符串 |
-| 适用场景 | 配置相对固定 | 配置动态变化 |
+| 方面 | 配置文件 | 动态配置字符串 | zlog_modular 封装 |
+|------|----------|----------------|-------------------|
+| 灵活性 | 静态，需要提前定义 | 动态，运行时构建 | 动态，按模块增量添加 |
+| 解耦性 | 所有模块耦合在一个文件 | 需手动合并所有模块配置 | 每个模块完全独立 |
+| 调试 | 修改文件需要 reload | 可通过命令即时调整 | 可按模块注册/卸载 |
+| 复杂度 | 简单，直接编辑文件 | 需要编程构建字符串 | API 调用，最简单 |
+| 重复处理 | 手动避免 | 手动避免 | 自动检测和覆盖 |
+| 线程安全 | N/A | reload 线程安全 | 注册/卸载线程安全 |
+| 适用场景 | 配置相对固定 | 配置动态变化 | 模块化/插件化架构 |
 
 ## 最佳实践
 
@@ -202,7 +273,17 @@ void on_config_update(const char *remote_config) {
 A: reload 期间会短暂阻塞，但不会丢失日志。建议在低负载时刻执行。
 
 **Q: 可以只添加新分类不影响现有的吗？**
-A: 不行，每次 reload 都是完整替换。需要在新配置中包含所有需要的规则。
+A: 直接使用 `zlog_reload_from_string()` 不行，每次 reload 都是完整替换。
+但使用 `zlog_modular.h` 封装层（`zlog_mod_register()`）可以按模块增量添加，封装层会自动合并所有已注册模块的配置。
+
+**Q: 多个模块格式名冲突怎么办？**
+A: 建议给格式名加模块前缀（如 `auth_fmt`）以避免冲突。如果冲突了，最后注册的会覆盖之前的。
+
+**Q: 重复加载同一模块怎么处理？**
+A: `zlog_mod_register()` 会自动检测同名模块，先卸载旧配置再注册新的。也可以先调用 `zlog_mod_has_module()` 检查。
+
+**Q: 可以在多个线程同时注册模块吗？**
+A: 可以，`zlog_modular.h` 的所有 API 都是线程安全的。参见 `modular_mt_demo.c`。
 
 **Q: 配置字符串中的百分号需要转义吗？**
 A: 在 C 字符串中，格式化符号的百分号需要写成 `%%`（两个百分号）。
