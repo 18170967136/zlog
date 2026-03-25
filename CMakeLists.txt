@@ -69,4 +69,5 @@ endif ()
 
 if (BUILD_EXAMPLES)
     add_subdirectory(examples/multi_thread)
+    add_subdirectory(examples/dynamic_config)
 endif ()
