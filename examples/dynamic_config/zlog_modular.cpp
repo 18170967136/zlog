@@ -166,15 +166,19 @@ int zlog_mod_register(const char *module_name,
 
     /* Add formats array */
     json fmt_array = json::array();
-    for (int i = 0; i < format_count && formats; i++) {
-        fmt_array.push_back(formats[i]);
+    if (formats) {
+        for (int i = 0; i < format_count; i++) {
+            fmt_array.push_back(formats[i]);
+        }
     }
     entry["formats"] = std::move(fmt_array);
 
     /* Add rules array */
     json rule_array = json::array();
-    for (int i = 0; i < rule_count && rules; i++) {
-        rule_array.push_back(rules[i]);
+    if (rules) {
+        for (int i = 0; i < rule_count; i++) {
+            rule_array.push_back(rules[i]);
+        }
     }
     entry["rules"] = std::move(rule_array);
 
@@ -244,7 +248,10 @@ char *zlog_mod_dump_json(void)
     /* dump(4) 返回 4 空格缩进的格式化 JSON 字符串 */
     std::string json_str = g_state.root.dump(4);
 
-    /* 返回 C 风格字符串，调用者用 free() 释放 */
+    /*
+     * 使用 malloc 分配 C 风格字符串，因为公共 API（extern "C"）
+     * 约定调用者用 free() 释放返回值，保持 C 兼容性。
+     */
     char *result = static_cast<char *>(malloc(json_str.size() + 1));
     if (!result) {
         return nullptr;
