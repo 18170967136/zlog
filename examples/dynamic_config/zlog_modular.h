@@ -5,12 +5,14 @@
  * 每个模块可以独立注册自己的格式和规则，本层维护一个全局注册表，
  * 在每次变更后自动重建完整配置字符串并调用 zlog_reload_from_string()。
  *
- * 内部使用 cJSON 管理配置数据，支持通过 zlog_mod_dump_json() 导出
- * 当前所有模块的注册状态为 JSON 文档，方便观测和调试。
+ * 内部使用 nlohmann::json（https://github.com/nlohmann/json）管理配置数据，
+ * 使用 std::mutex + std::lock_guard（RAII）实现线程安全，
+ * 支持通过 zlog_mod_dump_json() 导出当前所有模块的注册状态为 JSON 文档，
+ * 方便观测和调试。
  *
  * 特点：
  *   - 不修改 zlog 源码，仅使用公共 API
- *   - 线程安全（使用 pthread_mutex 保护注册表）
+ *   - 线程安全（使用 std::mutex + RAII lock_guard 保护注册表）
  *   - 支持重复加载检测和覆盖
  *   - 支持按模块名卸载
  *   - 支持导出 JSON 文档，提升可观测性

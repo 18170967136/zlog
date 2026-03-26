@@ -16,9 +16,11 @@ int zlog_reload_from_string(const char *config_string);
 
 ## 模块化加载封装 (zlog_modular)
 
-本目录额外提供了 `zlog_modular.h` / `zlog_modular.c` 封装层，基于 `zlog_reload_from_string()` 实现模块化分散加载。**不修改 zlog 源码**，仅使用公共 API。
+本目录额外提供了 `zlog_modular.h` / `zlog_modular.cpp` 封装层，基于 `zlog_reload_from_string()` 实现模块化分散加载。**不修改 zlog 源码**，仅使用公共 API。
 
-内部使用 [cJSON](https://github.com/DaveGamble/cJSON)（MIT 许可）管理配置数据，支持通过 `zlog_mod_dump_json()` 导出 JSON 文档，方便观测和调试。
+内部使用 [nlohmann/json](https://github.com/nlohmann/json)（MIT 许可，header-only C++ JSON 库）管理配置数据，
+使用 `std::mutex` + `std::lock_guard`（RAII 机制）实现线程安全，
+支持通过 `zlog_mod_dump_json()` 导出 JSON 文档，方便观测和调试。
 
 ```c
 #include "zlog_modular.h"
@@ -49,10 +51,10 @@ void zlog_mod_fini(void);
 
 ### 设计思路
 
-- 内部使用 cJSON 对象维护全局注册表，记录每个模块的格式和规则
+- 内部使用 `nlohmann::json` 对象维护全局注册表，记录每个模块的格式和规则
 - 每次 `zlog_mod_register()` / `zlog_mod_unregister()` 时，自动合并所有模块的配置，生成完整配置字符串，调用 `zlog_reload_from_string()`
 - 同名模块重复注册时，自动覆盖旧配置（解决重复加载问题）
-- 使用 `pthread_mutex` 保护注册表（线程安全）
+- 使用 `std::mutex` + `std::lock_guard`（RAII）保护注册表（线程安全，无需手动 unlock）
 - 调用 `zlog_mod_dump_json()` 可随时导出 JSON 文档，清晰展示所有模块的配置状态
 
 ### JSON 可观测性
@@ -113,9 +115,9 @@ if (json) {
 - 运行时动态添加新插件
 - 根据条件调整日志级别
 
-### modular_mt_demo.c
+### modular_mt_demo.cpp
 **多线程多模块分散加载示例**，使用 `zlog_modular.h` 封装层，演示：
-- 5 个线程并发注册 5 个模块的日志配置
+- 5 个线程并发注册 5 个模块的日志配置（使用 `std::thread`）
 - 重复加载同一模块时自动覆盖旧配置
 - 运行时卸载模块
 - 多线程并发日志输出
@@ -147,7 +149,7 @@ make
 cd examples/dynamic_config
 gcc -o simple_demo simple_demo.c -I../../src -L../../src -lzlog -lpthread
 gcc -o dynamic_demo dynamic_demo.c -I../../src -L../../src -lzlog -lpthread
-gcc -o modular_mt_demo modular_mt_demo.c zlog_modular.c cJSON.c -I../../src -L../../src -lzlog -lpthread -lm
+g++ -std=c++11 -o modular_mt_demo modular_mt_demo.cpp zlog_modular.cpp -I../../src -L../../src -lzlog -lpthread
 
 # 设置库路径并运行
 export LD_LIBRARY_PATH=../../src:$LD_LIBRARY_PATH
